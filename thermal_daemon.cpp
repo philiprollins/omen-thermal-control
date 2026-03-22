@@ -22,6 +22,39 @@ bool override_max = false;   // True if user clicked MAX mode
 auto last_high_temp_time = std::chrono::steady_clock::now();
 nvmlDevice_t device;
 
+GtkWidget *ram_menu_item = nullptr;
+GtkWidget *vram_menu_item = nullptr;
+
+// Helper to generate a text-based progress bar for DBus menus
+std::string make_progress_bar(double used, double total, int width = 12) {
+    if (total <= 0) return "";
+    int filled = (int)((used / total) * width);
+    if (filled > width) filled = width;
+    std::string bar = "[";
+    for (int i = 0; i < width; ++i) {
+        if (i < filled) bar += "█";
+        else bar += "░";
+    }
+    bar += "]";
+    return bar;
+}
+
+// Helper to calculate RAM usage
+double get_system_ram_usage_gb(double& total_gb) {
+    std::ifstream file("/proc/meminfo");
+    std::string line;
+    long long mem_total = 0, mem_available = 0;
+    while (std::getline(file, line)) {
+        if (line.compare(0, 9, "MemTotal:") == 0) {
+            sscanf(line.c_str(), "MemTotal: %lld kB", &mem_total);
+        } else if (line.compare(0, 13, "MemAvailable:") == 0) {
+            sscanf(line.c_str(), "MemAvailable: %lld kB", &mem_available);
+        }
+    }
+    total_gb = mem_total / (1024.0 * 1024.0);
+    return (mem_total - mem_available) / (1024.0 * 1024.0);
+}
+
 // Helper to run your shell command
 void set_fan_mode(int mode) {
     std::string cmd = "echo " + std::to_string(mode) + " | sudo tee /sys/devices/platform/hp-wmi/hwmon/hwmon*/pwm1_enable > /dev/null";
@@ -66,6 +99,25 @@ gboolean update_logic(gpointer data) {
         char label_text[128];
         snprintf(label_text, sizeof(label_text), "CPU: %d°C | GPU: %d°C", cpu_temp, gpu_temp);
         app_indicator_set_label(indicator, label_text, "CPU: 000°C | GPU: 000°C");
+
+        // Update System RAM limits
+        double ram_total_gb = 0;
+        double ram_used_gb = get_system_ram_usage_gb(ram_total_gb);
+        std::string ram_bar = make_progress_bar(ram_used_gb, ram_total_gb, 12);
+        char ram_text[256];
+        snprintf(ram_text, sizeof(ram_text), "RAM:  %s  %.1f / %.1f GB", ram_bar.c_str(), ram_used_gb, ram_total_gb);
+        gtk_menu_item_set_label(GTK_MENU_ITEM(ram_menu_item), ram_text);
+
+        // Update VRAM limits
+        nvmlMemory_t vram_info;
+        if (nvmlDeviceGetMemoryInfo(device, &vram_info) == NVML_SUCCESS) {
+            double vram_used_gb = vram_info.used / (1024.0 * 1024.0 * 1024.0);
+            double vram_total_gb = vram_info.total / (1024.0 * 1024.0 * 1024.0);
+            std::string vram_bar = make_progress_bar(vram_used_gb, vram_total_gb, 12);
+            char vram_text[256];
+            snprintf(vram_text, sizeof(vram_text), "VRAM: %s  %.1f / %.1f GB", vram_bar.c_str(), vram_used_gb, vram_total_gb);
+            gtk_menu_item_set_label(GTK_MENU_ITEM(vram_menu_item), vram_text);
+        }
 
         // Thermal Logic (only if not running under forced override)
         if (!override_max) {
@@ -118,6 +170,19 @@ int main(int argc, char **argv) {
     // Create Menu
     GtkWidget *menu = gtk_menu_new();
     
+    // System Stats (RAM/VRAM) Block Progress
+    ram_menu_item = gtk_menu_item_new_with_label("RAM:  [░░░░░░░░░░░░]  -- / -- GB");
+    gtk_widget_set_sensitive(ram_menu_item, FALSE);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), ram_menu_item);
+
+    vram_menu_item = gtk_menu_item_new_with_label("VRAM: [░░░░░░░░░░░░]  -- / -- GB");
+    gtk_widget_set_sensitive(vram_menu_item, FALSE);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), vram_menu_item);
+
+    // Separator line
+    GtkWidget *separator = gtk_separator_menu_item_new();
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), separator);
+
     // Toggle Item for MAX / AUTO
     GtkWidget *toggle_item = gtk_check_menu_item_new_with_label("Force MAX Fan Mode");
     g_signal_connect(toggle_item, "toggled", G_CALLBACK(on_fan_mode_toggled), NULL);
