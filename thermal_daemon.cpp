@@ -24,6 +24,8 @@ nvmlDevice_t device;
 
 GtkWidget *ram_menu_item = nullptr;
 GtkWidget *vram_menu_item = nullptr;
+GtkWidget *cpu_menu_item = nullptr;
+GtkWidget *gpu_menu_item = nullptr;
 
 // Helper to generate a text-based progress bar for DBus menus
 std::string make_progress_bar(double used, double total, int width = 12) {
@@ -37,6 +39,39 @@ std::string make_progress_bar(double used, double total, int width = 12) {
     }
     bar += "]";
     return bar;
+}
+
+// Helper to calculate CPU usage
+double get_cpu_usage() {
+    static unsigned long long lastTotalUser = 0, lastTotalUserLow = 0, lastTotalSys = 0, lastTotalIdle = 0;
+    std::ifstream file("/proc/stat");
+    std::string line;
+    std::getline(file, line);
+    unsigned long long totalUser, totalUserLow, totalSys, totalIdle, totalReserved;
+    sscanf(line.c_str(), "cpu %llu %llu %llu %llu %llu", &totalUser, &totalUserLow, &totalSys, &totalIdle, &totalReserved);
+
+    if (totalUser < lastTotalUser || totalUserLow < lastTotalUserLow || 
+        totalSys < lastTotalSys || totalIdle < lastTotalIdle) {
+        // Overflow detection. Just skip this value.
+        lastTotalUser = totalUser;
+        lastTotalUserLow = totalUserLow;
+        lastTotalSys = totalSys;
+        lastTotalIdle = totalIdle;
+        return 0.0;
+    }
+
+    unsigned long long total = (totalUser - lastTotalUser) + (totalUserLow - lastTotalUserLow) + (totalSys - lastTotalSys);
+    double percent = 0.0;
+    if (total > 0) {
+        percent = (double)total / (double)(total + (totalIdle - lastTotalIdle)) * 100.0;
+    }
+
+    lastTotalUser = totalUser;
+    lastTotalUserLow = totalUserLow;
+    lastTotalSys = totalSys;
+    lastTotalIdle = totalIdle;
+
+    return percent;
 }
 
 // Helper to calculate RAM usage
@@ -99,6 +134,22 @@ gboolean update_logic(gpointer data) {
         char label_text[128];
         snprintf(label_text, sizeof(label_text), "CPU: %d°C | GPU: %d°C", cpu_temp, gpu_temp);
         app_indicator_set_label(indicator, label_text, "CPU: 000°C | GPU: 000°C");
+
+        // Update CPU limits
+        double cpu_usage = get_cpu_usage();
+        std::string cpu_bar = make_progress_bar(cpu_usage, 100.0, 12);
+        char cpu_text[256];
+        snprintf(cpu_text, sizeof(cpu_text), "CPU:  %s  %5.1f %%", cpu_bar.c_str(), cpu_usage);
+        gtk_menu_item_set_label(GTK_MENU_ITEM(cpu_menu_item), cpu_text);
+
+        // Update GPU limits
+        nvmlUtilization_t gpu_util;
+        if (nvmlDeviceGetUtilizationRates(device, &gpu_util) == NVML_SUCCESS) {
+            std::string gpu_bar = make_progress_bar(gpu_util.gpu, 100.0, 12);
+            char gpu_text[256];
+            snprintf(gpu_text, sizeof(gpu_text), "GPU:  %s  %5.1d %%", gpu_bar.c_str(), gpu_util.gpu);
+            gtk_menu_item_set_label(GTK_MENU_ITEM(gpu_menu_item), gpu_text);
+        }
 
         // Update System RAM limits
         double ram_total_gb = 0;
@@ -170,6 +221,19 @@ int main(int argc, char **argv) {
     // Create Menu
     GtkWidget *menu = gtk_menu_new();
     
+    // System Stats (CPU/GPU) Block Progress
+    cpu_menu_item = gtk_menu_item_new_with_label("CPU:  [░░░░░░░░░░░░]   -- %");
+    gtk_widget_set_sensitive(cpu_menu_item, FALSE);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), cpu_menu_item);
+
+    gpu_menu_item = gtk_menu_item_new_with_label("GPU:  [░░░░░░░░░░░░]   -- %");
+    gtk_widget_set_sensitive(gpu_menu_item, FALSE);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), gpu_menu_item);
+
+    // Separator line
+    GtkWidget *separator1 = gtk_separator_menu_item_new();
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), separator1);
+
     // System Stats (RAM/VRAM) Block Progress
     ram_menu_item = gtk_menu_item_new_with_label("RAM:  [░░░░░░░░░░░░]  -- / -- GB");
     gtk_widget_set_sensitive(ram_menu_item, FALSE);
@@ -180,8 +244,8 @@ int main(int argc, char **argv) {
     gtk_menu_shell_append(GTK_MENU_SHELL(menu), vram_menu_item);
 
     // Separator line
-    GtkWidget *separator = gtk_separator_menu_item_new();
-    gtk_menu_shell_append(GTK_MENU_SHELL(menu), separator);
+    GtkWidget *separator2 = gtk_separator_menu_item_new();
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), separator2);
 
     // Toggle Item for MAX / AUTO
     GtkWidget *toggle_item = gtk_check_menu_item_new_with_label("Force MAX Fan Mode");
